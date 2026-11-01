@@ -164,8 +164,11 @@ async function generateSummaries(items) {
     parsed = parsed.response;
   }
   if (!parsed || !Array.isArray(parsed.articles)) {
-    console.error("Unexpected Cloudflare AI response structure:", JSON.stringify(parsed));
-    throw new Error('AI response must contain an "articles" array.');
+    // Some Workers AI responses may be valid JSON but not the requested
+    // { articles: [...] } envelope. Never infer or publish from that shape.
+    console.error("Cloudflare AI returned JSON in an unexpected shape; skipping this batch safely:",
+      JSON.stringify(parsed).slice(0, 1500));
+    return { articles: [] };
   }
   return parsed;
 }
