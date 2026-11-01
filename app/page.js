@@ -1,6 +1,9 @@
 
 import { createSupabaseClient } from "../lib/supabase";
 
+// Fetch published articles on each request instead of freezing them at build time.
+export const dynamic = "force-dynamic";
+
 const categories = [
   "World Politics",
   "Geopolitics",
