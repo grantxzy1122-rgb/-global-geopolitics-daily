@@ -163,36 +163,43 @@ ${JSON.stringify(items.map((item, index) => ({
 `;
 
   const response = await fetch(
-  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
-  {
+    `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-3.1-8b-instruct`,
+    {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": process.env.GEMINI_API_KEY
+        "Authorization": `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`,
+        "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 5000
-        }
+        prompt,
+        max_tokens: 4096,
+        temperature: 0.2
       })
     }
   );
 
-  if (!response.ok) {
-    throw new Error(`Gemini API error: ${await response.text()}`);
-  }
-
   const result = await response.json();
-  const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
 
-  if (!text) {
-    throw new Error("Gemini returned an empty response.");
+  if (!response.ok || !result.success) {
+    throw new Error(
+      `Cloudflare AI error: ${JSON.stringify(result)}`
+    );
   }
 
-  return JSON.parse(text);
+  const aiText = result.result?.response;
+
+  if (!aiText) {
+    throw new Error("Cloudflare returned an empty response.");
+  }
+
+  const start = aiText.indexOf("{");
+  const end = aiText.lastIndexOf("}");
+
+  if (start === -1 || end === -1) {
+    throw new Error("AI did not return valid JSON.");
+  }
+
+  return JSON.parse(aiText.slice(start, end + 1));
 }
 
 async function main() {
