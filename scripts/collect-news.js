@@ -118,18 +118,18 @@ async function collectNews() {
 
 async function generateSummaries(items) {
   const prompt = `
-You are a careful professional international news editor.
+You are a professional international geopolitical news editor.
 
-Review the supplied RSS news items and select only important
-geopolitical, diplomatic, political, security and economic stories.
+Select only important geopolitical, diplomatic, political,
+security and economic stories from the supplied RSS items.
 
-Return valid JSON only in this exact format:
+Return one JSON object with this exact structure:
 {
   "articles": [
     {
       "id": 1,
       "keep": true,
-      "title": "Professional factual headline",
+      "title": "Factual headline",
       "summary": "One or two sentence summary.",
       "content": "A concise original news report in English.",
       "category": "World Politics"
@@ -137,20 +137,22 @@ Return valid JSON only in this exact format:
   ]
 }
 
-Rules:
+STRICT RULES:
+- Output JSON only. No Markdown, Python, JavaScript, or explanations.
+- Use double quotes for all JSON keys and string values.
+- The top-level object must contain an "articles" array.
+- Each id must be the numeric id of the matching supplied item.
 - Use only facts in the supplied headline and description.
-- Never invent facts, dates, quotes, figures or background.
-- If the description is insufficient, keep the report very brief.
-- Do not copy the RSS description word for word.
+- Never invent facts, dates, quotes, figures, or background.
+- If details are insufficient, keep the report brief and cautious.
+- Do not copy RSS descriptions word for word.
 - Do not create opinion or political propaganda.
-- Ignore entertainment, sports and unrelated stories.
+- Ignore entertainment, sports, and unrelated stories.
 - Choose only one category from this exact list:
 ${CATEGORIES.join(", ")}
 - Keep headlines neutral and factual.
-- Keep summaries concise.
-- Return the original item id for every article.
-- Do not invent source URLs.
 - Do not include stories that are not geopolitically relevant.
+- If no stories qualify, return {"articles": []}.
 
 NEWS ITEMS:
 ${JSON.stringify(items.map((item, index) => ({
@@ -173,7 +175,10 @@ ${JSON.stringify(items.map((item, index) => ({
       body: JSON.stringify({
         prompt,
         max_tokens: 4096,
-        temperature: 0.2
+        temperature: 0.1,
+        response_format: {
+          type: "json_object"
+        }
       })
     }
   );
@@ -188,18 +193,25 @@ ${JSON.stringify(items.map((item, index) => ({
 
   const aiText = result.result?.response;
 
-  if (!aiText) {
-    throw new Error("Cloudflare returned an empty response.");
+  if (!aiText || typeof aiText !== "string") {
+    throw new Error("Cloudflare returned an empty or invalid response.");
   }
 
-  const start = aiText.indexOf("{");
-  const end = aiText.lastIndexOf("}");
+  let parsed;
 
-  if (start === -1 || end === -1) {
-    throw new Error("AI did not return valid JSON.");
+  try {
+    parsed = JSON.parse(aiText);
+  } catch (error) {
+    console.error("Invalid Cloudflare AI response:", aiText);
+    throw new Error("Cloudflare AI did not return valid JSON.");
   }
 
-  return JSON.parse(aiText.slice(start, end + 1));
+  if (!parsed || !Array.isArray(parsed.articles)) {
+    console.error("Unexpected Cloudflare AI JSON:", aiText);
+    throw new Error('AI response must contain an "articles" array.');
+  }
+
+  return parsed;
 }
 
 async function main() {
