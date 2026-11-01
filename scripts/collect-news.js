@@ -182,14 +182,46 @@ async function main() {
 
   const urls = items.map(item => item.url);
   const { data: existing, error: existingError } = await supabase
-    .from("articles").select("source_url").in("source_url", urls);
+    .from("articles")
+    .select("id, source_url, title, summary, content, category_id, status")
+    .in("source_url", urls);
   if (existingError) throw existingError;
 
-  const existingUrls = new Set((existing || []).map(item => item.source_url));
+  const existingRows = existing || [];
+  const existingUrls = new Set(existingRows.map(item => item.source_url));
+
+  // Publish existing drafts only when their source is in this run's current,
+  // trusted RSS results and the saved article has all essential fields.
+  let promotedCount = 0;
+  for (const draft of existingRows.filter(item => item.status === "draft")) {
+    const original = items.find(item => item.url === draft.source_url);
+    if (!original || !draft.title?.trim() || !draft.summary?.trim() ||
+        !draft.content?.trim() || !draft.category_id) {
+      console.log("Kept draft for editorial review: " + (draft.title || draft.source_url));
+      continue;
+    }
+
+    const feed = FEEDS.find(item => item.name === original.source);
+    if (!feed || !isTrustedArticleUrl(original.url, feed.allowedHosts)) continue;
+
+    const { data: promoted, error: promoteError } = await supabase
+      .from("articles")
+      .update({ status: "published", published_at: original.date })
+      .eq("id", draft.id)
+      .eq("status", "draft")
+      .select("id, title");
+    if (promoteError) throw promoteError;
+    if (promoted?.length) {
+      promotedCount += promoted.length;
+      console.log("PUBLISHED EXISTING DRAFT: " + promoted[0].title);
+    }
+  }
+  console.log("Published " + promotedCount + " existing trusted-source drafts.");
+
   const newItems = items.filter(item => !existingUrls.has(item.url));
   console.log(newItems.length + " new trusted stories need processing.");
   if (newItems.length === 0) {
-    console.log("All trusted stories already exist.");
+    console.log("No new stories to process.");
     return;
   }
 
