@@ -191,23 +191,50 @@ ${JSON.stringify(items.map((item, index) => ({
     );
   }
 
-  const aiText = result.result?.response;
+  const aiResponse = result.result?.response;
 
-  if (!aiText || typeof aiText !== "string") {
-    throw new Error("Cloudflare returned an empty or invalid response.");
+  if (
+    aiResponse === undefined ||
+    aiResponse === null ||
+    aiResponse === ""
+  ) {
+    console.error("Cloudflare response metadata:", JSON.stringify({
+      success: result.success,
+      errors: result.errors,
+      messages: result.messages,
+      resultKeys: Object.keys(result.result || {})
+    }));
+    throw new Error("Cloudflare returned an empty response.");
   }
 
   let parsed;
 
-  try {
-    parsed = JSON.parse(aiText);
-  } catch (error) {
-    console.error("Invalid Cloudflare AI response:", aiText);
-    throw new Error("Cloudflare AI did not return valid JSON.");
+  if (typeof aiResponse === "object" && !Array.isArray(aiResponse)) {
+    // Workers AI JSON Mode may return the structured object directly.
+    parsed = aiResponse;
+  } else if (typeof aiResponse === "string") {
+    try {
+      parsed = JSON.parse(aiResponse);
+    } catch (error) {
+      console.error("Invalid Cloudflare AI response text:", aiResponse);
+      throw new Error("Cloudflare AI did not return valid JSON.");
+    }
+  } else {
+    throw new Error("Cloudflare AI returned an unsupported response format.");
+  }
+
+  // Some model/API responses wrap the JSON payload in another response field.
+  if (
+    parsed &&
+    !Array.isArray(parsed.articles) &&
+    parsed.response &&
+    Array.isArray(parsed.response.articles)
+  ) {
+    parsed = parsed.response;
   }
 
   if (!parsed || !Array.isArray(parsed.articles)) {
-    console.error("Unexpected Cloudflare AI JSON:", aiText);
+    console.error("Unexpected Cloudflare AI response structure:", JSON.stringify(parsed));
     throw new Error('AI response must contain an "articles" array.');
   }
 
