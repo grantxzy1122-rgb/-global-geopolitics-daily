@@ -163,8 +163,8 @@ ${JSON.stringify(items.map((item, index) => ({
 `;
 
   const response = await fetch(
-    https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent,
-    {
+  "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent",
+  {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
