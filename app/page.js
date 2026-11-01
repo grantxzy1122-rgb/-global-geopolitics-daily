@@ -17,8 +17,11 @@ export default async function Home() {
   const supabase = createSupabaseClient();
 
   let articles = [];
+  let diagnosticMessage = "";
 
-  if (supabase) {
+  if (!supabase) {
+    diagnosticMessage = "Supabase client could not be created. Check the NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY environment variables in Vercel.";
+  } else {
     const { data, error } = await supabase
       .from("articles")
       .select("id, title, slug, summary, category_id, published_at")
@@ -26,8 +29,14 @@ export default async function Home() {
       .order("published_at", { ascending: false })
       .limit(6);
 
-    if (!error && data) {
-      articles = data;
+    if (error) {
+      console.error("Homepage Supabase query failed:", error);
+      diagnosticMessage = "Supabase query error (" + (error.code || "unknown") + "): " + error.message;
+    } else {
+      articles = data || [];
+      if (articles.length === 0) {
+        diagnosticMessage = "Supabase connected, but the published-articles query returned zero rows. Check the published status values and public SELECT policy.";
+      }
     }
   }
 
@@ -103,10 +112,16 @@ export default async function Home() {
                 ))}
               </div>
             ) : (
-              <p style={{ color: "#777", lineHeight: 1.8 }}>
-                No published articles yet. Our latest global news
-                updates will appear here after editorial approval.
-              </p>
+              <div>
+                <p style={{ color: "#777", lineHeight: 1.8 }}>
+                  No published articles are currently being displayed.
+                </p>
+                {diagnosticMessage ? (
+                  <p style={{ color: "#b45309", lineHeight: 1.8, fontSize: "13px", overflowWrap: "anywhere" }}>
+                    Diagnostic: {diagnosticMessage}
+                  </p>
+                ) : null}
+              </div>
             )}
           </div>
         </section>
