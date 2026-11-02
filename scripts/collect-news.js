@@ -36,12 +36,20 @@ const MAX_AGE_HOURS = 36;
 const AI_BATCH_SIZE = 4;
 const GEO_KEYWORDS = /\b(president|prime minister|government|election|elections|vote|parliament|congress|senate|lawmakers|minister|diplomat|diplomacy|foreign ministry|state department|white house|kremlin|military|army|armed forces|war|conflict|attack|airstrike|strike|missile|drone|troops|ceasefire|peace deal|peace talks|security|nato|united nations|\bun\b|sanctions|tariff|trade deal|trade war|central bank|interest rate|inflation|oil prices|energy supply|border|migration|refugee|coup|treaty|summit|sovereignty|territory|occupation|nuclear|geopolit|iran|israel|ukraine|russia|china|taiwan|gaza|palestine|syria|yemen|sudan|north korea|south korea|european union|\beu\b|afghanistan|pakistan|india|saudi arabia|turkey|venezuela|cuba|myanmar|libya|lebanon|iraq|somalia|western sahara)\b/i;
 const SPORTS_KEYWORDS = /\b(sport|sports|football|soccer|basketball|nba|nfl|cricket|tennis|golf|baseball|rugby|formula one|f1|premier league|champions league|world cup|match report|live scores|top 25)\b/i;
+const TRUSTED_SYNDICATED_PUBLISHERS = /\b(associated press|ap news|reuters|bbc|bbc news|al jazeera|deutsche welle|dw|the guardian|financial times|the new york times|new york times|the washington post|cnn|cbs news|abc news|nbc news|france 24|the independent|politico|bloomberg)\b/i;
+
+function isTrustedSource(item) {
+  // Yahoo is an aggregator; accept it only when its original publisher is recognized.
+  if (item.source_feed !== "Yahoo News") return true;
+  return TRUSTED_SYNDICATED_PUBLISHERS.test(String(item.source || ""));
+}
 
 function isGeopoliticalStory(item) {
   const url = String(item.url || "").toLowerCase();
   const text = String(item.title || "") + " " + String(item.description || "");
   if (/\/(video|videos)\//.test(url) || /\.(mp4|m3u8)(\?|$)/.test(url)) return false;
   if (SPORTS_KEYWORDS.test(text)) return false;
+  if (!isTrustedSource(item)) return false;
   return GEO_KEYWORDS.test(text);
 }
 
@@ -272,7 +280,9 @@ async function main() {
       const original = batch[articleId - 1];
       if (!original) continue;
 
-      const title = cleanText(article.title || original.title);
+      // Keep the headline as supplied by the original publisher.
+      const publisherTitle = cleanText(original.title);
+      const title = publisherTitle;
       const summary = cleanText(article.summary);
       const content = cleanText(article.content || article.summary);
       if (title.length < 12 || summary.length < 20 || content.length < 40) {
@@ -281,8 +291,9 @@ async function main() {
       }
 
       let category = cleanText(article.category).toLowerCase();
-      if (!categoryMap.has(category)) {
-        category = categoryMap.has("geopolitics") ? "geopolitics" : "world politics";
+      if (!CATEGORIES.some(name => name.toLowerCase() === category)) {
+        console.log("Skipped unsupported AI category for: " + original.title);
+        continue;
       }
       const categoryId = categoryMap.get(category);
       if (!categoryId) {
@@ -301,7 +312,7 @@ async function main() {
         category_id: categoryId,
         source_name: original.source,
         source_url: original.url,
-        status: "draft",
+        status: "published",
         published_at: original.date
       });
       categoryCounts.set(category, count + 1);
@@ -324,11 +335,11 @@ async function main() {
     .from("articles").insert(rows).select("id, title");
   if (error) throw error;
 
-  console.log("Successfully saved " + data.length + " articles as drafts for editorial review.");
+  console.log("Successfully auto-published " + data.length + " eligible articles.");
   for (const [category, count] of categoryCounts) {
     console.log("CATEGORY " + category + ": " + count);
   }
-  for (const article of data) console.log("DRAFT: " + article.title);
+  for (const article of data) console.log("PUBLISHED: " + article.title);
 }
 
 main().catch(error => {
