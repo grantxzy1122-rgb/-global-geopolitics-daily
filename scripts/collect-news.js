@@ -33,6 +33,17 @@ const CATEGORIES = [
 const MAX_PER_CATEGORY = 10;
 const MAX_ITEMS_PER_RUN = 60;
 const MAX_AGE_HOURS = 36;
+const AI_BATCH_SIZE = 4;
+const GEO_KEYWORDS = /\b(president|prime minister|government|election|elections|vote|parliament|congress|senate|lawmakers|minister|diplomat|diplomacy|foreign ministry|state department|white house|kremlin|military|army|armed forces|war|conflict|attack|airstrike|strike|missile|drone|troops|ceasefire|peace deal|peace talks|security|nato|united nations|\bun\b|sanctions|tariff|trade deal|trade war|central bank|interest rate|inflation|oil prices|energy supply|border|migration|refugee|coup|treaty|summit|sovereignty|territory|occupation|nuclear|geopolit|iran|israel|ukraine|russia|china|taiwan|gaza|palestine|syria|yemen|sudan|north korea|south korea|european union|\beu\b|afghanistan|pakistan|india|saudi arabia|turkey|venezuela|cuba|myanmar|libya|lebanon|iraq|somalia|western sahara)\b/i;
+const SPORTS_KEYWORDS = /\b(sport|sports|football|soccer|basketball|nba|nfl|cricket|tennis|golf|baseball|rugby|formula one|f1|premier league|champions league|world cup|match report|live scores|top 25)\b/i;
+
+function isGeopoliticalStory(item) {
+  const url = String(item.url || "").toLowerCase();
+  const text = String(item.title || "") + " " + String(item.description || "");
+  if (/\/(video|videos)\//.test(url) || /\.(mp4|m3u8)(\?|$)/.test(url)) return false;
+  if (SPORTS_KEYWORDS.test(text)) return false;
+  return GEO_KEYWORDS.test(text);
+}
 
 function makeSlug(title, url) {
   const base = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 65);
@@ -114,28 +125,33 @@ async function collectNews() {
     unique.push(item);
   }
 
-  console.log("Collected " + unique.length + " fresh items from selected RSS feeds.");
-  return unique.slice(0, MAX_ITEMS_PER_RUN);
+  const relevant = unique.filter(isGeopoliticalStory);
+  console.log("Collected " + unique.length + " fresh items; " +
+    (unique.length - relevant.length) + " excluded by geopolitical relevance filters.");
+  console.log("Retained " + relevant.length + " geopolitical candidates.");
+  return relevant.slice(0, MAX_ITEMS_PER_RUN);
 }
 
 function parseAiArticles(aiResponse) {
   let parsed = aiResponse;
   if (typeof parsed === "string") {
-    const cleaned = parsed.replace(/^\s*```(?:json)?/i, "").replace(/```\s*$/, "").trim();
-    parsed = JSON.parse(cleaned);
+    let cleaned = parsed.trim()
+      .replace(/^\`\`\`(?:json)?\s*/i, "")
+      .replace(/\s*\`\`\`$/, "");
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (firstError) {
+      const start = cleaned.indexOf("{");
+      const end = cleaned.lastIndexOf("}");
+      if (start < 0 || end <= start) throw firstError;
+      parsed = JSON.parse(cleaned.slice(start, end + 1));
+    }
   }
-
   if (Array.isArray(parsed)) return parsed;
   if (parsed && Array.isArray(parsed.articles)) return parsed.articles;
-  if (parsed && parsed.response && Array.isArray(parsed.response.articles)) {
-    return parsed.response.articles;
-  }
-  // Accept a single-article object if the model omits the requested wrapper.
-  if (parsed && parsed.id !== undefined &&
-      (parsed.summary || parsed.content || parsed.title)) return [parsed];
-
-  console.error("Unrecognized AI response shape:", JSON.stringify(parsed).slice(0, 1800));
-  return [];
+  if (parsed && parsed.response && Array.isArray(parsed.response.articles)) return parsed.response.articles;
+  if (parsed && parsed.id !== undefined && (parsed.summary || parsed.content || parsed.title)) return [parsed];
+  throw new Error("AI response did not contain an articles array.");
 }
 
 async function generateSummaries(items) {
@@ -143,10 +159,10 @@ async function generateSummaries(items) {
     "You write concise, neutral news summaries for Global Geopolitics Daily.",
     "This is summarization and categorization, not an independent fact-checking task.",
     "Use only information present in each supplied headline and description. Do not add outside facts, context, quotes, numbers, motives or predictions.",
-    "Do not decide whether a story is important or reject it for editorial preference. Create a concise summary for every supplied item.",
-    "Return valid JSON only in this shape: { \"articles\": [{ \"id\": 1, \"title\": \"...\", \"summary\": \"...\", \"content\": \"...\", \"category\": \"...\" }] }.",
-    "Keep the original meaning. Write title in clear English, summary in 1-2 sentences, and content in 2-4 short paragraphs.",
-    "If the description is short, keep the report short and do not fill gaps with guesses.",
+    "Only summarize the supplied items. Do not add outside facts, quotes, numbers, motives or predictions.",
+    "Return one result for every input item, preserving its numeric id exactly. Return valid JSON only.",
+    "Required shape: { \"articles\": [{ \"id\": 1, \"title\": \"...\", \"summary\": \"...\", \"content\": \"...\", \"category\": \"...\" }] }.",
+    "Title: clear English. Summary: 1-2 factual sentences. Content: 2-3 concise sentences. Do not pad short descriptions.",
     "Choose exactly one category from: " + CATEGORIES.join(", ") + ".",
     "NEWS ITEMS:",
     JSON.stringify(items.map((item, index) => ({
@@ -170,8 +186,8 @@ async function generateSummaries(items) {
       },
       body: JSON.stringify({
         prompt,
-        max_tokens: 4096,
-        temperature: 0.2,
+        max_tokens: 2048,
+        temperature: 0.1,
         response_format: { type: "json_object" }
       })
     }
@@ -226,20 +242,29 @@ async function main() {
   const rows = [];
   const categoryCounts = new Map();
   const batches = [];
-  for (let i = 0; i < newItems.length; i += 8) batches.push(newItems.slice(i, i + 8));
+  for (let i = 0; i < newItems.length; i += AI_BATCH_SIZE) batches.push(newItems.slice(i, i + AI_BATCH_SIZE));
 
-  for (const batch of batches) {
+  async function processBatch(batch) {
     let articles;
     try {
       articles = await generateSummaries(batch);
     } catch (error) {
-      console.error("AI summarization batch failed:", error.message);
-      continue;
+      if (batch.length > 1) {
+        const midpoint = Math.ceil(batch.length / 2);
+        console.warn("AI batch failed (" + error.message + "); retrying smaller batches.");
+        await processBatch(batch.slice(0, midpoint));
+        await processBatch(batch.slice(midpoint));
+      } else {
+        console.error("AI could not summarize story: " + batch[0].title + " — " + error.message);
+      }
+      return;
     }
 
+    const returnedIds = new Set();
     for (const article of articles) {
       const articleId = Number(article.id);
-      if (!Number.isInteger(articleId) || articleId < 1 || articleId > batch.length) continue;
+      if (!Number.isInteger(articleId) || articleId < 1 || articleId > batch.length || returnedIds.has(articleId)) continue;
+      returnedIds.add(articleId);
       const original = batch[articleId - 1];
       if (!original) continue;
 
@@ -264,7 +289,6 @@ async function main() {
       const count = categoryCounts.get(category) || 0;
       if (count >= MAX_PER_CATEGORY) continue;
 
-      categoryCounts.set(category, count + 1);
       rows.push({
         title: title.slice(0, 180),
         slug: makeSlug(title, original.url),
@@ -276,8 +300,11 @@ async function main() {
         status: "published",
         published_at: original.date
       });
+      categoryCounts.set(category, count + 1);
     }
   }
+
+  for (const batch of batches) await processBatch(batch);
 
   if (rows.length === 0) {
     console.log("No complete AI summaries were returned. Nothing was published.");
