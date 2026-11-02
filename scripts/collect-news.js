@@ -58,6 +58,10 @@ function cleanText(value) {
 
 function getPublisher(item, feed) {
   const source = item.source;
+  if (feed.name === "Associated Press" &&
+      (!source || (typeof source === "string" && /^(top stories|flipboard)$/i.test(source.trim())))) {
+    return "Associated Press";
+  }
   if (source && typeof source === "object" && source.title) return cleanText(source.title);
   if (typeof source === "string" && source.trim()) return cleanText(source);
   if (item["dc:creator"]) return cleanText(item["dc:creator"]);
@@ -297,10 +301,15 @@ async function main() {
         category_id: categoryId,
         source_name: original.source,
         source_url: original.url,
-        status: "published",
+        status: "draft",
         published_at: original.date
       });
       categoryCounts.set(category, count + 1);
+    }
+    for (let expectedId = 1; expectedId <= batch.length; expectedId++) {
+      if (!returnedIds.has(expectedId)) {
+        console.warn("AI omitted item " + expectedId + " in batch; story left unpublished: " + batch[expectedId - 1].title);
+      }
     }
   }
 
@@ -315,11 +324,11 @@ async function main() {
     .from("articles").insert(rows).select("id, title");
   if (error) throw error;
 
-  console.log("Successfully published " + data.length + " articles.");
+  console.log("Successfully saved " + data.length + " articles as drafts for editorial review.");
   for (const [category, count] of categoryCounts) {
     console.log("CATEGORY " + category + ": " + count);
   }
-  for (const article of data) console.log("PUBLISHED: " + article.title);
+  for (const article of data) console.log("DRAFT: " + article.title);
 }
 
 main().catch(error => {
