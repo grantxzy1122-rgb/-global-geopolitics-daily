@@ -1,25 +1,56 @@
-
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createSupabaseClient } from "../../../lib/supabase";
 
+const siteUrl = "https://global-geopolitics-daily-khan-73f2.vercel.app";
+
 export const dynamic = "force-dynamic";
 
-export default async function ArticlePage({ params }) {
-  const { slug } = await params;
+async function getArticle(slug) {
   const supabase = createSupabaseClient();
-  if (!supabase) notFound();
+  if (!supabase) return null;
 
-  const { data: article, error } = await supabase
+  const { data } = await supabase
     .from("articles")
     .select("id, title, slug, summary, content, category_id, source_name, source_url, published_at")
     .eq("slug", slug)
     .eq("status", "published")
     .maybeSingle();
 
-  if (error) console.error("Article page query failed:", error);
+  return data || null;
+}
+
+export async function generateMetadata({ params }) {
+  const { slug } = await params;
+  const article = await getArticle(slug);
+  if (!article) return { title: "Article not found", robots: { index: false, follow: false } };
+
+  const description = (article.summary || article.content || "Read the latest global news and geopolitical developments.")
+    .replace(/\s+/g, " ")
+    .slice(0, 160);
+
+  return {
+    title: article.title,
+    description,
+    alternates: { canonical: `/article/${article.slug}` },
+    openGraph: {
+      type: "article",
+      url: `${siteUrl}/article/${article.slug}`,
+      title: article.title,
+      description,
+      publishedTime: article.published_at || undefined,
+      siteName: "Global Geopolitics Daily",
+    },
+    twitter: { card: "summary", title: article.title, description },
+  };
+}
+
+export default async function ArticlePage({ params }) {
+  const { slug } = await params;
+  const article = await getArticle(slug);
   if (!article) notFound();
 
+  const supabase = createSupabaseClient();
   const { data: category } = await supabase
     .from("categories").select("name").eq("id", article.category_id).maybeSingle();
 
