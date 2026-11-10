@@ -33,7 +33,7 @@ const CATEGORIES = [
 const MAX_PER_CATEGORY = 10;
 const MAX_ITEMS_PER_RUN = 60;
 const MAX_AGE_HOURS = 36;
-const AI_BATCH_SIZE = 4;
+const AI_BATCH_SIZE = 1;
 const GEO_KEYWORDS = /\b(president|prime minister|government|election|elections|vote|parliament|congress|senate|lawmakers|minister|diplomat|diplomacy|foreign ministry|state department|white house|kremlin|military|army|armed forces|war|conflict|attack|airstrike|strike|missile|drone|troops|ceasefire|peace deal|peace talks|security|nato|united nations|\bun\b|sanctions|tariff|trade deal|trade war|central bank|interest rate|inflation|oil prices|energy supply|border|migration|refugee|coup|treaty|summit|sovereignty|territory|occupation|nuclear|geopolit|iran|israel|ukraine|russia|china|taiwan|gaza|palestine|syria|yemen|sudan|north korea|south korea|european union|\beu\b|afghanistan|pakistan|india|saudi arabia|turkey|venezuela|cuba|myanmar|libya|lebanon|iraq|somalia|western sahara)\b/i;
 const SPORTS_KEYWORDS = /\b(sport|sports|football|soccer|basketball|nba|nfl|cricket|tennis|golf|baseball|rugby|formula one|f1|premier league|champions league|world cup|match report|live scores|top 25)\b/i;
 const TRUSTED_SYNDICATED_PUBLISHERS = /\b(associated press|ap news|reuters|bbc|bbc news|al jazeera|deutsche welle|dw|the guardian|financial times|the new york times|new york times|the washington post|cnn|cbs news|abc news|nbc news|france 24|the independent|politico|bloomberg)\b/i;
@@ -147,9 +147,9 @@ async function collectNews() {
 function parseAiArticles(aiResponse) {
   let parsed = aiResponse;
   if (typeof parsed === "string") {
-    let cleaned = parsed.trim()
-      .replace(/^\`\`\`(?:json)?\s*/i, "")
-      .replace(/\s*\`\`\`$/, "");
+    const cleaned = parsed.trim()
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```$/, "");
     try {
       parsed = JSON.parse(cleaned);
     } catch (firstError) {
@@ -159,62 +159,92 @@ function parseAiArticles(aiResponse) {
       parsed = JSON.parse(cleaned.slice(start, end + 1));
     }
   }
+
   if (Array.isArray(parsed)) return parsed;
   if (parsed && Array.isArray(parsed.articles)) return parsed.articles;
   if (parsed && parsed.response && Array.isArray(parsed.response.articles)) return parsed.response.articles;
-  if (parsed && parsed.id !== undefined && (parsed.summary || parsed.content || parsed.title)) return [parsed];
-  throw new Error("AI response did not contain an articles array.");
+  if (parsed && parsed.result && Array.isArray(parsed.result.articles)) return parsed.result.articles;
+
+  // Each request contains exactly one story, so accept a single article object
+  // even if the model omits the wrapper or numeric id.
+  if (parsed && typeof parsed === "object" &&
+      (parsed.summary || parsed.content) && (parsed.category || parsed.title)) {
+    return [{ ...parsed, id: parsed.id === undefined ? 1 : parsed.id }];
+  }
+
+  throw new Error("AI response did not contain a usable article object.");
 }
 
 async function generateSummaries(items) {
+  if (items.length !== 1) {
+    throw new Error("AI summarizer expects one story per request.");
+  }
+
+  const item = items[0];
   const prompt = [
-    "You write concise, neutral news summaries for Global Geopolitics Daily.",
-    "This is summarization and categorization, not an independent fact-checking task.",
-    "Use only information present in each supplied headline and description. Do not add outside facts, context, quotes, numbers, motives or predictions.",
-    "Only summarize the supplied items. Do not add outside facts, quotes, numbers, motives or predictions.",
-    "Return one result for every input item, preserving its numeric id exactly. Return valid JSON only.",
-    "Required shape: { \"articles\": [{ \"id\": 1, \"title\": \"...\", \"summary\": \"...\", \"content\": \"...\", \"category\": \"...\" }] }.",
-    "Title: clear English. Summary: 1-2 factual sentences. Content: 2-3 concise sentences. Do not pad short descriptions.",
-    "Choose exactly one category from: " + CATEGORIES.join(", ") + ".",
-    "NEWS ITEMS:",
-    JSON.stringify(items.map((item, index) => ({
-      id: index + 1,
-      publisher: item.source,
-      headline: item.title,
-      description: item.description,
-      published: item.date
-    })))
+    "You are a careful, neutral news editor for Global Geopolitics Daily.",
+    "Summarize ONLY the facts explicitly present in the supplied headline and description.",
+    "Never add outside knowledge, context, quotes, dates, numbers, motives, predictions, or assumptions.",
+    "Keep the original meaning. If the description is short, write a short summary rather than inventing details.",
+    "Return exactly one JSON object, not an array and not markdown.",
+    "The JSON object must have these fields: id (number, exactly 1), summary (string), content (string), category (string).",
+    "summary: one or two factual sentences. content: two concise factual sentences based only on the supplied text.",
+    "category must be exactly one of: " + CATEGORIES.join(", ") + ".",
+    "Example format: {\\"id\\":1,\\"summary\\":\\"...\\",\\"content\\":\\"...\\",\\"category\\":\\"Diplomacy\\"}",
+    "PUBLISHER: " + item.source,
+    "HEADLINE: " + item.title,
+    "DESCRIPTION: " + (item.description || "No description supplied.")
   ].join("\n");
 
-  const response = await fetch(
-    "https://api.cloudflare.com/client/v4/accounts/" +
-      process.env.CLOUDFLARE_ACCOUNT_ID +
-      "/ai/run/@cf/meta/llama-3.1-8b-instruct",
-    {
-      method: "POST",
-      headers: {
-        "Authorization": "Bearer " + process.env.CLOUDFLARE_API_TOKEN,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        prompt,
-        max_tokens: 2048,
-        temperature: 0.1,
-        response_format: { type: "json_object" }
-      })
+  const endpoint = "https://api.cloudflare.com/client/v4/accounts/" +
+    process.env.CLOUDFLARE_ACCOUNT_ID +
+    "/ai/run/@cf/meta/llama-3.1-8b-instruct";
+
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + process.env.CLOUDFLARE_API_TOKEN,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prompt,
+          max_tokens: 900,
+          temperature: 0,
+          response_format: { type: "json_object" }
+        })
+      });
+
+      const result = await response.json();
+      if (!response.ok || !result.success) {
+        throw new Error("Cloudflare AI HTTP " + response.status + ": " +
+          JSON.stringify(result).slice(0, 700));
+      }
+
+      const aiResponse = result.result && result.result.response;
+      if (aiResponse === undefined || aiResponse === null || aiResponse === "") {
+        throw new Error("Cloudflare returned an empty model response.");
+      }
+
+      try {
+        return parseAiArticles(aiResponse);
+      } catch (parseError) {
+        throw new Error(parseError.message + " Raw response: " +
+          String(aiResponse).slice(0, 500));
+      }
+    } catch (error) {
+      lastError = error;
+      console.warn("AI attempt " + attempt + "/3 failed for '" +
+        item.title + "': " + error.message);
+      if (attempt < 3) {
+        await new Promise(resolve => setTimeout(resolve, attempt * 1500));
+      }
     }
-  );
-
-  const result = await response.json();
-  if (!response.ok || !result.success) {
-    throw new Error("Cloudflare AI error: " + JSON.stringify(result));
   }
 
-  const aiResponse = result.result && result.result.response;
-  if (aiResponse === undefined || aiResponse === null || aiResponse === "") {
-    throw new Error("Cloudflare returned an empty response: " + JSON.stringify(result).slice(0, 1200));
-  }
-  return parseAiArticles(aiResponse);
+  throw lastError || new Error("AI summarization failed after 3 attempts.");
 }
 
 async function main() {
