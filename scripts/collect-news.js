@@ -160,10 +160,14 @@ function parseAiArticles(aiResponse) {
     }
   }
 
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed && Array.isArray(parsed.articles)) return parsed.articles;
-  if (parsed && parsed.response && Array.isArray(parsed.response.articles)) return parsed.response.articles;
-  if (parsed && parsed.result && Array.isArray(parsed.result.articles)) return parsed.result.articles;
+  const addMissingIds = articles => articles.map((article, index) => ({
+    ...article,
+    id: article.id === undefined ? index + 1 : article.id
+  }));
+  if (Array.isArray(parsed)) return addMissingIds(parsed);
+  if (parsed && Array.isArray(parsed.articles)) return addMissingIds(parsed.articles);
+  if (parsed && parsed.response && Array.isArray(parsed.response.articles)) return addMissingIds(parsed.response.articles);
+  if (parsed && parsed.result && Array.isArray(parsed.result.articles)) return addMissingIds(parsed.result.articles);
 
   // Each request contains exactly one story, so accept a single article object
   // even if the model omits the wrapper or numeric id.
