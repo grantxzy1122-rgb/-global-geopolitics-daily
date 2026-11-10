@@ -190,7 +190,7 @@ async function generateSummaries(items) {
     "The JSON object must have these fields: id (number, exactly 1), summary (string), content (string), category (string).",
     "summary: one or two factual sentences. content: two concise factual sentences based only on the supplied text.",
     "category must be exactly one of: " + CATEGORIES.join(", ") + ".",
-    "Example format: {\\"id\\":1,\\"summary\\":\\"...\\",\\"content\\":\\"...\\",\\"category\\":\\"Diplomacy\\"}",
+'    "Example format: {\\"id\\":1,\\"summary\\":\\"...\\",\\"content\\":\\"...\\",\\"category\\":\\"Diplomacy\\"}",
     "PUBLISHER: " + item.source,
     "HEADLINE: " + item.title,
     "DESCRIPTION: " + (item.description || "No description supplied.")
