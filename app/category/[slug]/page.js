@@ -1,7 +1,8 @@
-
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { createSupabaseClient } from "../../../lib/supabase";
+
+const siteUrl = "https://global-geopolitics-daily-khan-73f2.vercel.app";
 
 export const dynamic = "force-dynamic";
 
@@ -13,6 +14,25 @@ const categories = [
   { name: "Diplomacy", slug: "diplomacy" },
   { name: "Middle East", slug: "middle-east" }
 ];
+
+export async function generateMetadata({ params }) {
+  const { slug } = await params;
+  const selected = categories.find((item) => item.slug === slug);
+  if (!selected) return { title: "Topic not found", robots: { index: false, follow: false } };
+
+  const description = `Latest ${selected.name.toLowerCase()} news, international developments and reporting from Global Geopolitics Daily.`;
+  return {
+    title: `${selected.name} News`,
+    description,
+    alternates: { canonical: `/category/${selected.slug}` },
+    openGraph: {
+      type: "website",
+      url: `${siteUrl}/category/${selected.slug}`,
+      title: `${selected.name} News | Global Geopolitics Daily`,
+      description,
+    },
+  };
+}
 
 export default async function CategoryPage({ params }) {
   const { slug } = await params;
