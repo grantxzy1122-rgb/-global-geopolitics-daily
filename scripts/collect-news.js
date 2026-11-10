@@ -147,9 +147,12 @@ async function collectNews() {
 function parseAiArticles(aiResponse) {
   let parsed = aiResponse;
   if (typeof parsed === "string") {
-    const cleaned = parsed.trim()
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```$/, "");
+    const fence = String.fromCharCode(96).repeat(3);
+    let cleaned = parsed.trim();
+    if (cleaned.startsWith(fence)) {
+      cleaned = cleaned.slice(fence.length).replace(/^json\s*/i, "");
+      if (cleaned.endsWith(fence)) cleaned = cleaned.slice(0, -fence.length);
+    }
     try {
       parsed = JSON.parse(cleaned);
     } catch (firstError) {
@@ -160,55 +163,72 @@ function parseAiArticles(aiResponse) {
     }
   }
 
-  const addMissingIds = articles => articles.map((article, index) => ({
-    ...article,
-    id: article.id === undefined ? index + 1 : article.id
-  }));
-  if (Array.isArray(parsed)) return addMissingIds(parsed);
-  if (parsed && Array.isArray(parsed.articles)) return addMissingIds(parsed.articles);
-  if (parsed && parsed.response && Array.isArray(parsed.response.articles)) return addMissingIds(parsed.response.articles);
-  if (parsed && parsed.result && Array.isArray(parsed.result.articles)) return addMissingIds(parsed.result.articles);
-
-  // Cloudflare JSON mode returns the generated JSON object under result.response.
-  // Accept both the direct object and common nested response wrappers.
   const candidates = [
     parsed,
     parsed && parsed.response,
     parsed && parsed.result,
-    parsed && parsed.result && parsed.result.response
+    parsed && parsed.result && parsed.result.response,
+    parsed && parsed.data,
+    parsed && parsed.output
   ];
+
   for (const candidate of candidates) {
-    if (candidate && typeof candidate === "object" &&
-        !Array.isArray(candidate) &&
-        (candidate.summary || candidate.content) &&
-        (candidate.category || candidate.title)) {
-      return [{ ...candidate, id: candidate.id === undefined ? 1 : candidate.id }];
+    if (Array.isArray(candidate) && candidate.length === 1) {
+      const article = candidate[0];
+      if (article && typeof article === "object") {
+        return [{ ...article, id: article.id === undefined ? 1 : article.id }];
+      }
+    }
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      if (Array.isArray(candidate.articles) && candidate.articles.length === 1) {
+        const article = candidate.articles[0];
+        return [{ ...article, id: article.id === undefined ? 1 : article.id }];
+      }
+      if (candidate.summary || candidate.content) {
+        return [{ ...candidate, id: candidate.id === undefined ? 1 : candidate.id }];
+      }
     }
   }
 
-  throw new Error("AI response did not contain a usable article object.");
+  const responseType = parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed;
+  throw new Error("AI response did not contain a usable article object (received " + responseType + ").");
 }
 
 async function generateSummaries(items) {
-  if (items.length !== 1) {
-    throw new Error("AI summarizer expects one story per request.");
-  }
+  if (items.length !== 1) throw new Error("AI summarizer expects one story per request.");
 
   const item = items[0];
-  const prompt = [
+  const systemMessage = [
     "You are a careful, neutral news editor for Global Geopolitics Daily.",
-    "Summarize ONLY the facts explicitly present in the supplied headline and description.",
-    "Never add outside knowledge, context, quotes, dates, numbers, motives, predictions, or assumptions.",
-    "Keep the original meaning. If the description is short, write a short summary rather than inventing details.",
-    "Return exactly one JSON object, not an array and not markdown.",
-    "The JSON object must have these fields: id (number, exactly 1), summary (string), content (string), category (string).",
-    "summary: one or two factual sentences. content: two concise factual sentences based only on the supplied text.",
+    "Transform the supplied publisher headline and description into a short factual summary.",
+    "Use ONLY information explicitly stated in those two supplied fields.",
+    "Do not add outside knowledge, background context, quotes, dates, numbers, motives, predictions, or assumptions.",
+    "If the description is short or unclear, keep the output short and do not fill gaps.",
+    "Return one article object matching the supplied JSON schema. Do not return explanations or markdown."
+  ].join(" ");
+
+  const userMessage = [
+    "Create one article from this source item.",
+    "id must be the number 1.",
+    "summary must be 1-2 factual sentences.",
+    "content must be 2 concise factual sentences, and must not introduce facts absent from the source.",
     "category must be exactly one of: " + CATEGORIES.join(", ") + ".",
-    'Example format: {"id":1,"summary":"...","content":"...","category":"Diplomacy"}',
     "PUBLISHER: " + item.source,
     "HEADLINE: " + item.title,
     "DESCRIPTION: " + (item.description || "No description supplied.")
   ].join("\n");
+
+  const articleSchema = {
+    type: "object",
+    properties: {
+      id: { type: "integer", enum: [1] },
+      summary: { type: "string" },
+      content: { type: "string" },
+      category: { type: "string", enum: CATEGORIES }
+    },
+    required: ["id", "summary", "content", "category"],
+    additionalProperties: false
+  };
 
   const endpoint = "https://api.cloudflare.com/client/v4/accounts/" +
     process.env.CLOUDFLARE_ACCOUNT_ID +
@@ -217,6 +237,10 @@ async function generateSummaries(items) {
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
+      const responseFormat = attempt === 2
+        ? { type: "json_object" }
+        : { type: "json_schema", json_schema: articleSchema };
+
       const response = await fetch(endpoint, {
         method: "POST",
         headers: {
@@ -224,17 +248,24 @@ async function generateSummaries(items) {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          prompt,
-          max_tokens: 900,
+          messages: [
+            { role: "system", content: systemMessage },
+            { role: "user", content: userMessage }
+          ],
+          max_tokens: 700,
           temperature: 0,
-          response_format: { type: "json_object" }
+          response_format: responseFormat
         })
       });
 
       const result = await response.json();
       if (!response.ok || !result.success) {
-        throw new Error("Cloudflare AI HTTP " + response.status + ": " +
-          JSON.stringify(result).slice(0, 700));
+        const details = JSON.stringify({
+          errors: result.errors,
+          messages: result.messages,
+          result: result.result
+        }).slice(0, 700);
+        throw new Error("Cloudflare AI HTTP " + response.status + ": " + details);
       }
 
       const aiResponse = result.result && result.result.response;
@@ -243,24 +274,30 @@ async function generateSummaries(items) {
       }
 
       try {
-        return parseAiArticles(aiResponse);
+        const articles = parseAiArticles(aiResponse);
+        const article = articles[0];
+        if (!article || Number(article.id) !== 1 ||
+            typeof article.summary !== "string" ||
+            typeof article.content !== "string" ||
+            typeof article.category !== "string") {
+          throw new Error("AI response did not match the required article fields.");
+        }
+        return articles;
       } catch (parseError) {
-        const rawPreview = typeof aiResponse === "string"
-          ? aiResponse
-          : JSON.stringify(aiResponse);
-        throw new Error(parseError.message + " Raw response: " +
-          String(rawPreview).slice(0, 700));
+        let rawPreview;
+        try {
+          rawPreview = typeof aiResponse === "string" ? aiResponse : JSON.stringify(aiResponse);
+        } catch (ignored) {
+          rawPreview = String(aiResponse);
+        }
+        throw new Error(parseError.message + " Raw response: " + String(rawPreview).slice(0, 500));
       }
     } catch (error) {
       lastError = error;
-      console.warn("AI attempt " + attempt + "/3 failed for '" +
-        item.title + "': " + error.message);
-      if (attempt < 3) {
-        await new Promise(resolve => setTimeout(resolve, attempt * 1500));
-      }
+      console.warn("AI attempt " + attempt + "/3 failed for '" + item.title + "': " + error.message);
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1500));
     }
   }
-
   throw lastError || new Error("AI summarization failed after 3 attempts.");
 }
 
