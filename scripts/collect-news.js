@@ -169,11 +169,21 @@ function parseAiArticles(aiResponse) {
   if (parsed && parsed.response && Array.isArray(parsed.response.articles)) return addMissingIds(parsed.response.articles);
   if (parsed && parsed.result && Array.isArray(parsed.result.articles)) return addMissingIds(parsed.result.articles);
 
-  // Each request contains exactly one story, so accept a single article object
-  // even if the model omits the wrapper or numeric id.
-  if (parsed && typeof parsed === "object" &&
-      (parsed.summary || parsed.content) && (parsed.category || parsed.title)) {
-    return [{ ...parsed, id: parsed.id === undefined ? 1 : parsed.id }];
+  // Cloudflare JSON mode returns the generated JSON object under result.response.
+  // Accept both the direct object and common nested response wrappers.
+  const candidates = [
+    parsed,
+    parsed && parsed.response,
+    parsed && parsed.result,
+    parsed && parsed.result && parsed.result.response
+  ];
+  for (const candidate of candidates) {
+    if (candidate && typeof candidate === "object" &&
+        !Array.isArray(candidate) &&
+        (candidate.summary || candidate.content) &&
+        (candidate.category || candidate.title)) {
+      return [{ ...candidate, id: candidate.id === undefined ? 1 : candidate.id }];
+    }
   }
 
   throw new Error("AI response did not contain a usable article object.");
@@ -235,8 +245,11 @@ async function generateSummaries(items) {
       try {
         return parseAiArticles(aiResponse);
       } catch (parseError) {
+        const rawPreview = typeof aiResponse === "string"
+          ? aiResponse
+          : JSON.stringify(aiResponse);
         throw new Error(parseError.message + " Raw response: " +
-          String(aiResponse).slice(0, 500));
+          String(rawPreview).slice(0, 700));
       }
     } catch (error) {
       lastError = error;
@@ -365,11 +378,27 @@ async function main() {
     return;
   }
 
+  // A repeated title/source can produce a slug that already exists. Ignore only
+  // slug conflicts so one duplicate cannot fail the entire publishing run.
+  const uniqueRows = [];
+  const seenSlugs = new Set();
+  for (const row of rows) {
+    if (seenSlugs.has(row.slug)) {
+      console.log("Skipped duplicate slug in this run: " + row.slug);
+      continue;
+    }
+    seenSlugs.add(row.slug);
+    uniqueRows.push(row);
+  }
+
   const { data, error } = await supabase
-    .from("articles").insert(rows).select("id, title");
+    .from("articles")
+    .upsert(uniqueRows, { onConflict: "slug", ignoreDuplicates: true })
+    .select("id, title");
   if (error) throw error;
 
-  console.log("Successfully auto-published " + data.length + " eligible articles.");
+  console.log("Successfully auto-published " + (data || []).length +
+    " eligible articles; existing duplicate slugs were safely skipped.");
   for (const [category, count] of categoryCounts) {
     console.log("CATEGORY " + category + ": " + count);
   }
